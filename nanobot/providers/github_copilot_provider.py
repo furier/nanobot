@@ -206,6 +206,17 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         self._copilot_access_token = str(token)
         return self._copilot_access_token
 
+    def _should_use_responses_api(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> bool:
+        """Use Responses API for GitHub Copilot models that require it (e.g. gpt-5*)."""
+        model_name = (model or self.default_model).lower()
+        if reasoning_effort and reasoning_effort.lower() != "none":
+            return True
+        return any(token in model_name for token in ("gpt-5", "o1", "o3", "o4"))
+
     async def _refresh_client_api_key(self) -> str:
         token = await self._get_copilot_access_token()
         self.api_key = token
