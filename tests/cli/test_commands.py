@@ -382,10 +382,23 @@ async def test_github_copilot_provider_refreshes_client_api_key_before_chat():
 
     mock_client = MagicMock()
     mock_client.api_key = "no-key"
-    mock_client.chat.completions.create = AsyncMock(return_value={
-        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    mock_client.default_headers = {}
+    # gpt-5.1 routes through the Responses API, not chat.completions
+    responses_mock = AsyncMock(return_value={
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        "status": "completed",
     })
+
+    def with_options(**kwargs):
+        inner = MagicMock()
+        inner.api_key = mock_client.api_key
+        inner.default_headers = kwargs.get("default_headers", {})
+        inner.responses.create = responses_mock
+        inner.with_options = with_options
+        return inner
+
+    mock_client.with_options = with_options
 
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI", return_value=mock_client):
         provider = GitHubCopilotProvider(default_model="github-copilot/gpt-5.1")
@@ -400,9 +413,130 @@ async def test_github_copilot_provider_refreshes_client_api_key_before_chat():
     )
 
     assert response.content == "ok"
-    assert provider._client.api_key == "copilot-access-token"
     provider._get_copilot_access_token.assert_awaited_once()
-    mock_client.chat.completions.create.assert_awaited_once()
+    responses_mock.assert_awaited_once()
+
+
+def test_github_copilot_x_initiator_user_on_user_last_message():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    messages = [
+        {"role": "user", "content": "hello"},
+    ]
+    assert GitHubCopilotProvider._x_initiator(messages) == "user"
+
+
+def test_github_copilot_x_initiator_agent_on_tool_result():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    messages = [
+        {"role": "user", "content": "do something"},
+        {"role": "assistant", "tool_calls": [{"id": "1", "function": {"name": "exec"}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "done"},
+    ]
+    assert GitHubCopilotProvider._x_initiator(messages) == "agent"
+
+
+def test_github_copilot_x_initiator_agent_on_assistant_last():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "thinking..."},
+    ]
+    assert GitHubCopilotProvider._x_initiator(messages) == "agent"
+
+
+def test_github_copilot_x_initiator_agent_on_empty():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    assert GitHubCopilotProvider._x_initiator([]) == "agent"
+
+
+@pytest.mark.asyncio
+async def test_github_copilot_chat_sets_x_initiator_user():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    captured_headers: dict = {}
+
+    mock_client = MagicMock()
+    mock_client.api_key = "no-key"
+    mock_client.default_headers = {}
+
+    def with_options(**kwargs):
+        captured_headers.update(kwargs.get("default_headers", {}))
+        # Return a new mock that behaves the same
+        inner = MagicMock()
+        inner.api_key = mock_client.api_key
+        inner.default_headers = kwargs.get("default_headers", {})
+        inner.responses.create = AsyncMock(return_value={
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            "status": "completed",
+        })
+        inner.with_options = with_options
+        return inner
+
+    mock_client.with_options = with_options
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI", return_value=mock_client):
+        provider = GitHubCopilotProvider(default_model="github-copilot/gpt-5.1")
+
+    provider._get_copilot_access_token = AsyncMock(return_value="copilot-access-token")
+
+    await provider.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        model="github-copilot/gpt-5.1",
+        max_tokens=16,
+        temperature=0.1,
+    )
+
+    assert captured_headers.get("x-initiator") == "user"
+
+
+@pytest.mark.asyncio
+async def test_github_copilot_chat_sets_x_initiator_agent():
+    from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+    captured_headers: dict = {}
+
+    mock_client = MagicMock()
+    mock_client.api_key = "no-key"
+    mock_client.default_headers = {}
+
+    def with_options(**kwargs):
+        captured_headers.update(kwargs.get("default_headers", {}))
+        inner = MagicMock()
+        inner.api_key = mock_client.api_key
+        inner.default_headers = kwargs.get("default_headers", {})
+        inner.responses.create = AsyncMock(return_value={
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            "status": "completed",
+        })
+        inner.with_options = with_options
+        return inner
+
+    mock_client.with_options = with_options
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI", return_value=mock_client):
+        provider = GitHubCopilotProvider(default_model="github-copilot/gpt-5.1")
+
+    provider._get_copilot_access_token = AsyncMock(return_value="copilot-access-token")
+
+    # Last message is a tool result — agentic follow-up
+    await provider.chat(
+        messages=[
+            {"role": "user", "content": "search something"},
+            {"role": "assistant", "tool_calls": [{"id": "1", "function": {"name": "web_search"}}]},
+            {"role": "tool", "tool_call_id": "1", "content": "results..."},
+        ],
+        model="github-copilot/gpt-5.1",
+        max_tokens=16,
+        temperature=0.1,
+    )
+
+    assert captured_headers.get("x-initiator") == "agent"
 
 
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():

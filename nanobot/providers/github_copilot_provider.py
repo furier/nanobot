@@ -206,6 +206,23 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         self._copilot_access_token = str(token)
         return self._copilot_access_token
 
+    @staticmethod
+    def _x_initiator(messages: list[dict[str, object]]) -> str:
+        """Return 'user' if the last message is from the user, else 'agent'.
+
+        GitHub Copilot uses the ``x-initiator`` header to distinguish
+        user-initiated requests (which count as premium requests) from
+        autonomous agentic follow-ups such as post-tool-call iterations
+        (which do not count).  Only the first turn of a multi-step agent
+        loop — where the last message is a genuine user prompt — should be
+        billed as a premium request.
+        """
+        if messages:
+            last = messages[-1]
+            if isinstance(last, dict) and last.get("role") == "user":
+                return "user"
+        return "agent"
+
     async def _refresh_client_api_key(self) -> str:
         token = await self._get_copilot_access_token()
         self.api_key = token
@@ -223,6 +240,9 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         tool_choice: str | dict[str, object] | None = None,
     ):
         await self._refresh_client_api_key()
+        self._client = self._client.with_options(
+            default_headers={**self._client.default_headers, "x-initiator": self._x_initiator(messages)},
+        )
         return await super().chat(
             messages=messages,
             tools=tools,
@@ -245,6 +265,9 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         on_content_delta: Callable[[str], None] | None = None,
     ):
         await self._refresh_client_api_key()
+        self._client = self._client.with_options(
+            default_headers={**self._client.default_headers, "x-initiator": self._x_initiator(messages)},
+        )
         return await super().chat_stream(
             messages=messages,
             tools=tools,
